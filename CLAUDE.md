@@ -184,6 +184,14 @@ is idle (checked every 2 min).
   (`state.json`).
 - `proxy_state.rs` — per-profile proxy stats and per-session credential cache.
 - `notifications.rs` — debounce logic for attention notifications.
+- `selection.rs` — copy-on-select (`[ui] copy_on_select`, default on): the
+  pure `Selection` (anchor/head spans, cell/word/line unit, `contains`),
+  multi-click counting and the OSC 52 encoder. A left drag in the pane
+  selects only while the session's mouse reporting is off (otherwise the
+  mouse is forwarded as before); the release emits `Effect::CopyToClipboard`
+  with `Screen::text` and a "copied N chars" notice. The selection is
+  cleared by a click, key, paste, tab switch, resize or re-attach. Glue:
+  `App::select_mouse` in `interaction.rs`; highlight in `ui/mod.rs`.
 - `test_support.rs` — shared fixtures for the TUI's unit tests.
 
 **`remote/`** — SSH bootstrap and bridge:

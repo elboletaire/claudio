@@ -217,6 +217,8 @@ Manager keys use `Alt`, so they don't clash with Claude Code. In terminal tabs t
 | `Alt+q` | Quit the UI (sessions keep running) |
 | `Ctrl+D` twice, `/exit` | Claude Code's own exit: the tab closes |
 
+**Mouse.** Click a tab to switch to it. Drag in a session to select text; it is copied to the clipboard when you let go (the status bar says `copied N chars`). Double-click selects a word, triple-click a line. The selection stays highlighted until the next click, key or tab switch. Copying uses OSC 52, so the terminal has to allow it (most do; in tmux, `set -g set-clipboard on`). If the program in the session uses the mouse itself, clicks go to it instead, and `Shift`+drag gives you the terminal's own selection. Turn copy-on-select off with `copy_on_select = false`.
+
 ---
 
 ## Remote sessions
@@ -248,6 +250,7 @@ When a newer release exists, the status bar shows `↑ vX.Y.Z`. `claudio upgrade
 ```toml
 [ui]
 notify = true                   # desktop notifications for sessions that need you
+copy_on_select = true           # drag in a session to select and copy (OSC 52)
 
 [update]
 check = true                    # check for new claudio releases
