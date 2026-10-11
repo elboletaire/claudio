@@ -363,6 +363,30 @@ fn test_7_input_echo() {
     tui.quit(WAIT);
 }
 
+// ── Copy on select ────────────────────────────────────────────────────────────
+
+/// A mouse drag over the fake claude's banner (which takes no mouse) selects
+/// and copies it: the status bar says how much. claudio enables SGR mouse
+/// reporting, so the terminal sends `ESC [ < b ; x ; y M/m`, 1-based.
+#[test]
+fn test_7b_drag_copies_the_selection() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, WAIT);
+
+    // The banner is the pane's first row: screen row 2 (1-based), below the
+    // tab bar. Drag over its first 18 columns, "FAKE_CLAUDE_BANNER".
+    tui.send_keys(b"\x1b[<0;1;2M");
+    tui.send_keys(b"\x1b[<32;10;2M");
+    tui.send_keys(b"\x1b[<32;18;2M");
+    tui.send_keys(b"\x1b[<0;18;2m");
+    tui.wait_for("copied 18 chars", Region::StatusBar, WAIT);
+
+    tui.quit(WAIT);
+}
+
 // ── Overview ──────────────────────────────────────────────────────────────────
 
 /// Overview popup (Alt+g) lists both sessions; ↑ navigates; Enter switches.

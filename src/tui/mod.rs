@@ -16,6 +16,7 @@ mod keymap;
 mod notifications;
 mod plain;
 mod proxy_state;
+mod selection;
 mod sessions;
 mod state;
 mod stats_view;
@@ -90,6 +91,16 @@ fn emit_notification(label: &str) {
     let msg = format!("\x1b]9;claudio: {safe} needs you\x07");
     let _ = std::io::stdout().write_all(msg.as_bytes());
     let _ = std::io::stdout().flush();
+}
+
+/// Hand `text` to the outer terminal's clipboard with OSC 52, written to
+/// stdout between ratatui frames like [`emit_notification`]. The terminal
+/// must allow it (tmux: `set -g set-clipboard on`).
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(selection::osc52(text).as_bytes());
+    let _ = out.flush();
 }
 
 /// What the UI is started as.
@@ -202,6 +213,7 @@ async fn main(launch: Launch) -> ExitCode {
         home: local_client.welcome().host.home.clone(),
         keymap,
         notify: config.ui.notify && plain.is_none(),
+        copy_on_select: config.ui.copy_on_select,
         proxy_override,
         proxy_profiles,
         proxy_default,
@@ -755,6 +767,7 @@ fn run_effect(
             spawn_connect(host, gen, ev_tx.clone(), false);
         }
         Effect::LoadSshHosts => app.on_ssh_hosts(crate::remote::hosts::candidates()),
+        Effect::CopyToClipboard(text) => copy_to_clipboard(&text),
         Effect::Save => {
             if let Err(e) = app.to_state().save(&paths::client_state()) {
                 app.notify(format!("could not save state: {e}"));

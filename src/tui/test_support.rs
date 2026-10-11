@@ -20,6 +20,7 @@ pub fn config() -> AppConfig {
         home: "/home/u".to_owned(),
         keymap: Keymap::default(),
         notify: true,
+        copy_on_select: true,
         proxy_override: Default::default(),
         proxy_profiles: Vec::new(),
         proxy_default: None,

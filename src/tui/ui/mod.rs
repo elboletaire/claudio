@@ -22,6 +22,7 @@ use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
 use super::app::{App, Modal, Mode, SessionView};
+use super::selection::Selection;
 use super::fmt::{abbreviate_home, fmt_age, str_width, tail, truncate};
 use super::wizard::{resume_label, Wizard};
 
@@ -312,10 +313,29 @@ fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     view.mirror.render(area, frame.buffer_mut());
+    if let Some(sel) = app.selection.as_ref().filter(|s| s.session == view.id) {
+        highlight_selection(frame.buffer_mut(), area, sel);
+    }
     if app.modal.is_none() {
         if let Some((col, row)) = view.mirror.cursor() {
             if col < area.width && row < area.height {
                 frame.set_cursor_position((area.x + col, area.y + row));
+            }
+        }
+    }
+}
+
+/// Show the selected cells of the pane at `area` in reverse video (cells
+/// that already are reversed are shown plain, so they stand out too).
+fn highlight_selection(buf: &mut ratatui::buffer::Buffer, area: Rect, sel: &Selection) {
+    let (start, end) = sel.bounds();
+    for row in start.row..=end.row.min(area.height.saturating_sub(1)) {
+        for col in 0..area.width {
+            if !sel.contains(row, col) {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                cell.modifier.toggle(Modifier::REVERSED);
             }
         }
     }

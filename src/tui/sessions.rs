@@ -245,6 +245,7 @@ impl App {
             }
         }
         self.active = Some(i);
+        self.clear_selection();
         let (rows, cols) = self.pane_size();
         let view = &mut self.sessions[i];
         view.attached = true;

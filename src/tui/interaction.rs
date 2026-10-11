@@ -10,16 +10,18 @@ use crossterm::event::{
 
 use std::collections::HashSet;
 use std::io;
+use std::time::Instant;
 
 use crate::client::Incoming;
 use crate::proto::{Msg, SessionEvent, SessionId, SessionKind, SessionState};
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
-use crate::term::screen::Screen;
+use crate::term::screen::{MouseMode, Screen};
 
 use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
 use super::git_view::GitView;
 use super::keymap::Action;
+use super::selection::{self, Pos, Selection, Unit};
 use super::sessions::SessionView;
 use super::stats_view::StatsView;
 use super::ui;
@@ -96,6 +98,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
+        self.clear_selection();
         let action = self.keymap.lookup(&key);
         if action == Some(Action::Quit) {
             self.on_action(Action::Quit);
@@ -312,6 +315,7 @@ impl App {
     }
 
     fn on_paste(&mut self, text: &str) {
+        self.clear_selection();
         match &mut self.modal {
             Some(Modal::Wizard(w)) => {
                 let outcome = w.on_paste(text);
@@ -342,6 +346,9 @@ impl App {
             }
             return;
         }
+        if self.select_mouse(&m) {
+            return;
+        }
         if self.mode == Mode::Manager && m.row == 0 {
             if m.kind == MouseEventKind::Down(MouseButton::Left) {
                 let titles = ui::tab_titles(&self.sessions, self.active, self.width, self.now);
@@ -360,6 +367,98 @@ impl App {
         }
     }
 
+    // ── Copy on select ────────────────────────────────────────────────────────
+
+    /// Copy-on-select (see `selection.rs`): a left-button press in the pane
+    /// starts a selection, a drag extends it, and the release copies it.
+    /// Only when `[ui] copy_on_select` is on and the session has not turned
+    /// on mouse reporting (those events are its own). Returns whether the
+    /// event was the selection's.
+    fn select_mouse(&mut self, m: &MouseEvent) -> bool {
+        let (rows, cols) = self.pane_size();
+        let above = self.mode.rows_above();
+        // The pane cell under the mouse, clamped into the pane: a drag may
+        // leave it.
+        let at = Pos::new(
+            m.row.saturating_sub(above).min(rows - 1),
+            m.column.min(cols - 1),
+        );
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let in_pane = m.row >= above && m.row - above < rows;
+                let Some(v) = self.active_view().filter(|v| {
+                    in_pane
+                        && self.copy_on_select
+                        && v.attached
+                        && v.mirror.modes().mouse == MouseMode::Off
+                }) else {
+                    // Any other click still drops an old selection.
+                    self.clear_selection();
+                    return false;
+                };
+                let (id, line) = (v.id, v.mirror.row_chars(at.row));
+                let unit = Unit::from_clicks(self.clicks.press(at, Instant::now()));
+                self.selection = Some(Selection::new(id, unit, unit.span(at, &line)));
+                self.redraw = true;
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(line) = self.dragged_row(at.row) else { return false };
+                if let Some(sel) = &mut self.selection {
+                    sel.extend(sel.unit().span(at, &line));
+                }
+                self.redraw = true;
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.dragged_row(at.row).is_none() {
+                    return false;
+                }
+                self.finish_selection();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The characters of pane row `row` while a selection on the active
+    /// session is being dragged; `None` when there is no such drag.
+    fn dragged_row(&self, row: u16) -> Option<Vec<char>> {
+        let sel = self.selection.as_ref().filter(|s| s.dragging())?;
+        let v = self.active_view().filter(|v| v.id == sel.session)?;
+        Some(v.mirror.row_chars(row))
+    }
+
+    /// The button was released: copy the selection, or drop it when it is
+    /// a plain click (or only blanks). A copied selection stays highlighted
+    /// until the next click, key, paste, tab switch or resize.
+    fn finish_selection(&mut self) {
+        self.redraw = true;
+        let Some(sel) = &mut self.selection else { return };
+        sel.finish();
+        let (start, end) = sel.bounds();
+        let text = (!sel.is_empty())
+            .then(|| self.active_view())
+            .flatten()
+            .map(|v| v.mirror.text((start.row, start.col), (end.row, end.col)))
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            self.selection = None;
+            return;
+        }
+        let text = selection::clip(text);
+        let n = text.chars().count();
+        self.emit(Effect::CopyToClipboard(text));
+        self.notify(format!("copied {n} char{}", if n == 1 { "" } else { "s" }));
+    }
+
+    /// Drop the selection (its highlight goes with it).
+    pub(super) fn clear_selection(&mut self) {
+        if self.selection.take().is_some() {
+            self.redraw = true;
+        }
+    }
+
     fn on_focus(&mut self, gained: bool) {
         if let Some(v) = self.active_view().filter(|v| v.attached) {
             if let Some(bytes) = encode_focus(gained, &v.mirror.modes()) {
@@ -369,6 +468,7 @@ impl App {
     }
 
     fn on_resize(&mut self, width: u16, height: u16) {
+        self.clear_selection();
         self.width = width;
         self.height = height;
         self.redraw = true;
@@ -516,6 +616,9 @@ impl App {
             }
             Incoming::Attached { id, rows, cols } => {
                 if let Some(i) = self.index_of(id).filter(|&i| self.sessions[i].attached) {
+                    if self.selection.as_ref().is_some_and(|s| s.session == id) {
+                        self.selection = None;
+                    }
                     self.sessions[i].mirror = Screen::new(rows, cols);
                     self.redraw = true;
                 }
@@ -748,4 +851,210 @@ pub fn overview_matches(v: &SessionView, filter: &str) -> bool {
     let host = v.host.to_lowercase();
     let state = v.state.name();
     label.contains(&f) || cwd.contains(&f) || host.contains(&f) || state.contains(&f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::AppConfig;
+    use crate::tui::test_support::{self, app_with, info, press};
+    use crossterm::event::Event;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// A mouse event at screen `col`, `row` (row 0 is the tab bar).
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE })
+    }
+
+    const DOWN: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+    const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
+    const UP: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+
+    /// Press at `from`, drag to `to`, release there; screen `(col, row)`.
+    fn drag(app: &mut App, from: (u16, u16), to: (u16, u16)) {
+        app.on_terminal(mouse(DOWN, from.0, from.1));
+        app.on_terminal(mouse(DRAG, to.0, to.1));
+        app.on_terminal(mouse(UP, to.0, to.1));
+    }
+
+    fn click(app: &mut App, col: u16, row: u16) {
+        app.on_terminal(mouse(DOWN, col, row));
+        app.on_terminal(mouse(UP, col, row));
+    }
+
+    /// The texts the queued effects copy.
+    fn copied(app: &mut App) -> Vec<String> {
+        app.take_effects()
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::CopyToClipboard(t) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One idle session whose screen reads "hello world" / "second line".
+    fn app_with_text() -> App {
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.sessions[0].mirror.feed(b"hello world\r\nsecond line");
+        app
+    }
+
+    #[test]
+    fn a_drag_copies_the_selected_text() {
+        let mut app = app_with_text();
+        // Pane row 0 is screen row 1, below the tab bar.
+        drag(&mut app, (0, 1), (4, 1));
+        assert_eq!(copied(&mut app), ["hello"]);
+        assert_eq!(app.notice.as_ref().unwrap().text, "copied 5 chars");
+        let sel = app.selection.as_ref().expect("stays highlighted");
+        assert!(!sel.dragging() && sel.contains(0, 4) && !sel.contains(0, 5));
+
+        drag(&mut app, (6, 1), (5, 2));
+        assert_eq!(copied(&mut app), ["world\nsecond"], "across rows");
+        drag(&mut app, (5, 2), (6, 1));
+        assert_eq!(copied(&mut app), ["world\nsecond"], "dragged backwards");
+    }
+
+    #[test]
+    fn a_drag_past_the_pane_stops_at_its_edge() {
+        let mut app = app_with_text();
+        // The status bar is below the pane, the tab bar above it.
+        drag(&mut app, (7, 2), (500, 29));
+        assert_eq!(copied(&mut app), ["line"]);
+        drag(&mut app, (3, 2), (1, 0));
+        assert_eq!(copied(&mut app), ["ello world\nseco"]);
+    }
+
+    #[test]
+    fn double_and_triple_clicks_take_a_word_and_a_row() {
+        let mut app = app_with_text();
+        click(&mut app, 8, 1);
+        assert!(copied(&mut app).is_empty(), "a single click copies nothing");
+        assert!(app.selection.is_none());
+        click(&mut app, 8, 1);
+        assert_eq!(copied(&mut app), ["world"]);
+        click(&mut app, 8, 1);
+        assert_eq!(copied(&mut app), ["hello world"]);
+    }
+
+    #[test]
+    fn a_click_without_a_drag_clears_the_selection() {
+        let mut app = app_with_text();
+        drag(&mut app, (0, 1), (4, 1));
+        app.take_effects();
+        click(&mut app, 40, 5);
+        assert!(app.selection.is_none());
+        assert!(app.take_effects().is_empty());
+        // So does a click outside the pane (the status bar).
+        drag(&mut app, (0, 1), (4, 1));
+        app.take_effects();
+        click(&mut app, 3, 29);
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn blanks_alone_copy_nothing() {
+        let mut app = app_with_text();
+        drag(&mut app, (30, 5), (50, 6));
+        assert!(copied(&mut app).is_empty());
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn a_session_with_mouse_reporting_gets_the_mouse_instead() {
+        let mut app = app_with_text();
+        app.sessions[0].mirror.feed(b"\x1b[?1002h\x1b[?1006h");
+        let id = app.sessions[0].id;
+        drag(&mut app, (0, 1), (4, 1));
+        let effects = app.take_effects();
+        let inputs: Vec<&[u8]> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Input(i, b) if *i == id => Some(b.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            inputs,
+            [&b"\x1b[<0;1;1M"[..], b"\x1b[<32;5;1M", b"\x1b[<0;5;1m"],
+            "{effects:?}"
+        );
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn copy_on_select_off_leaves_the_mouse_alone() {
+        let mut app = App::new(AppConfig {
+            copy_on_select: false,
+            ..test_support::config()
+        });
+        app.recover(&Default::default(), &[info(Some(1), None)]);
+        app.take_effects();
+        app.sessions[0].mirror.feed(b"hello world");
+        drag(&mut app, (0, 1), (4, 1));
+        click(&mut app, 2, 1);
+        click(&mut app, 2, 1);
+        assert!(app.take_effects().is_empty());
+        assert!(app.selection.is_none() && app.notice.is_none());
+    }
+
+    #[test]
+    fn a_key_or_a_resize_clears_the_selection() {
+        let mut app = app_with_text();
+        drag(&mut app, (0, 1), (4, 1));
+        app.take_effects();
+        app.on_terminal(press(KeyCode::Char('h')));
+        assert!(app.selection.is_none());
+        let id = app.sessions[0].id;
+        assert!(
+            matches!(&app.take_effects()[..], [Effect::Input(i, b)] if *i == id && b == b"h"),
+            "the key still reaches the session"
+        );
+        drag(&mut app, (0, 1), (4, 1));
+        assert!(app.selection.is_some());
+        app.on_terminal(Event::Resize(90, 30));
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn the_tab_bar_still_switches_tabs_and_drops_the_selection() {
+        let mut app = app_with(&[info(Some(1), None), info(Some(2), None)]);
+        app.activate(0);
+        app.sessions[0].mirror.feed(b"hello world");
+        drag(&mut app, (0, 1), (4, 1));
+        app.take_effects();
+        let titles = ui::tab_titles(&app.sessions, app.active, app.width, app.now);
+        let col = (0..app.width).find(|&c| ui::tab_at(&titles, c) == Some(1)).unwrap();
+        app.on_terminal(mouse(DOWN, col, 0));
+        assert_eq!(app.active, Some(1));
+        assert!(app.selection.is_none());
+        assert!(copied(&mut app).is_empty());
+    }
+
+    #[test]
+    fn plain_mode_selects_from_the_top_row() {
+        let mut app = App::new(AppConfig {
+            mode: Mode::Plain,
+            ..test_support::config()
+        });
+        app.recover(&Default::default(), &[info(Some(1), None)]);
+        app.take_effects();
+        app.activate(0);
+        app.sessions[0].mirror.feed(b"hello world");
+        drag(&mut app, (6, 0), (10, 0));
+        assert_eq!(copied(&mut app), ["world"]);
+    }
+
+    #[test]
+    fn the_selection_is_drawn_reversed() {
+        let mut app = app_with_text();
+        drag(&mut app, (6, 1), (10, 1));
+        let mut terminal = Terminal::new(TestBackend::new(app.width, app.height)).unwrap();
+        terminal.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let reversed = |x: u16| buf[(x, 1)].modifier.contains(ratatui::style::Modifier::REVERSED);
+        assert!((6..=10).all(reversed), "world is highlighted");
+        assert!(!reversed(5) && !reversed(11) && !reversed(0));
+    }
 }

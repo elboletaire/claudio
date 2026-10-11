@@ -17,6 +17,8 @@
 //! - `plain`         – `claudio --plain`, one session full screen
 //! - `proxy_state`   – ProxyStatus and session credentials
 //! - `notifications` – Notice and attention notifications
+//! - `selection`     – copy-on-select in the pane (its glue is in
+//!                     `interaction`)
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
@@ -29,6 +31,7 @@ use crate::proxy::ProxyChoice;
 
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::keymap::Keymap;
+use super::selection::{Clicks, Selection};
 use super::proxy_state::{
     ProxyFetch, SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS,
 };
@@ -140,6 +143,8 @@ pub enum Effect {
         proxy_name: String,
         to: ReplyTo,
     },
+    /// Put this text on the outer terminal's clipboard (OSC 52).
+    CopyToClipboard(String),
 }
 
 /// What a request's reply is for.
@@ -269,6 +274,13 @@ pub struct App {
     /// one opens. Their requests carry it, so a reply meant for one that
     /// was closed (or replaced) since is recognised and dropped.
     pub(super) modal_gen: u64,
+    /// `[ui] copy_on_select`: a left-button drag in the pane selects and
+    /// copies text when the session does not take the mouse itself.
+    pub copy_on_select: bool,
+    /// The pane's text selection, if any (see `selection.rs`).
+    pub selection: Option<Selection>,
+    /// Press timing for double and triple clicks.
+    pub(super) clicks: Clicks,
 }
 
 /// What the app starts from. The event loop gathers it (reading config.toml,
@@ -283,6 +295,8 @@ pub struct AppConfig {
     pub keymap: Keymap,
     /// Desktop notifications for background sessions (`[ui] notify`).
     pub notify: bool,
+    /// Drag to select and copy in a pane (`[ui] copy_on_select`).
+    pub copy_on_select: bool,
     /// The startup proxy choice (`--proxy` / `--no-proxy`).
     pub proxy_override: ProxyChoice,
     /// The configured proxy profile names, and the default one.
@@ -343,6 +357,9 @@ impl App {
             confirms: VecDeque::new(),
             ssh_hosts: cfg.ssh_hosts,
             modal_gen: 0,
+            copy_on_select: cfg.copy_on_select,
+            selection: None,
+            clicks: Clicks::default(),
         }
     }
 

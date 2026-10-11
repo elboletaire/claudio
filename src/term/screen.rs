@@ -451,6 +451,76 @@ impl Screen {
         }
     }
 
+    /// The characters of screen row `row`, one per column: blanks as spaces,
+    /// and a wide character in both of its columns (so a double-click on
+    /// either half finds the same word). Empty past the last row.
+    pub fn row_chars(&self, row: u16) -> Vec<char> {
+        let grid = self.term.grid();
+        if row as usize >= grid.screen_lines() {
+            return Vec::new();
+        }
+        let line = Line(row as i32 - grid.display_offset() as i32);
+        let mut out: Vec<char> = Vec::with_capacity(grid.columns());
+        for c in 0..grid.columns() {
+            let cell = &grid[line][Column(c)];
+            let ch = if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                out.last().copied().unwrap_or(' ')
+            } else if cell.c == '\0' || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+                ' '
+            } else {
+                cell.c
+            };
+            out.push(ch);
+        }
+        out
+    }
+
+    /// The text from `start` to `end`, both `(row, col)` and inclusive, read
+    /// as a terminal selection: the rest of the first row, whole rows in
+    /// between, the last row up to `end`. Rows end with `\n` and lose their
+    /// trailing blanks, except a row that soft-wraps into the next one,
+    /// which continues it; blank rows at the end are dropped. Wide
+    /// characters count once, with their combining marks.
+    pub fn text(&self, start: (u16, u16), end: (u16, u16)) -> String {
+        let grid = self.term.grid();
+        let (n_rows, n_cols) = (grid.screen_lines(), grid.columns());
+        if n_rows == 0 || n_cols == 0 || start > end {
+            return String::new();
+        }
+        let last_row = (end.0 as usize).min(n_rows - 1);
+        let mut out = String::new();
+        for r in start.0 as usize..=last_row {
+            let line = Line(r as i32 - grid.display_offset() as i32);
+            let from = if r == start.0 as usize { start.1 as usize } else { 0 };
+            let to = if r == end.0 as usize { (end.1 as usize).min(n_cols - 1) } else { n_cols - 1 };
+            let mut row = String::new();
+            for c in from..=to {
+                let cell = &grid[line][Column(c)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                row.push(if cell.c == '\0' { ' ' } else { cell.c });
+                if let Some(zwc) = cell.zerowidth() {
+                    row.extend(zwc);
+                }
+            }
+            let wraps = grid[line][Column(n_cols - 1)].flags.contains(Flags::WRAPLINE);
+            if r < last_row && wraps {
+                out.push_str(&row);
+            } else {
+                out.push_str(row.trim_end_matches(' '));
+                if r < last_row {
+                    out.push('\n');
+                }
+            }
+        }
+        out.truncate(out.trim_end_matches('\n').len());
+        out
+    }
+
     /// Test accessor: returns a flat snapshot of (char, fg, bg, flags) for
     /// every visible cell, in row-major order.
     #[cfg(test)]
@@ -681,6 +751,50 @@ mod tests {
         assert_eq!(cell1.symbol(), " ", "spacer at col 1 should be blank");
         assert_eq!(cell2.symbol(), "🦀", "expected crab at col 2");
         assert_eq!(cell3.symbol(), " ", "spacer at col 3 should be blank");
+    }
+
+    #[test]
+    fn text_spans_rows_and_trims_trailing_blanks() {
+        let mut s = Screen::new(4, 20);
+        s.feed(b"first line   \r\nsecond\r\n\r\nfourth row");
+        assert_eq!(s.text((0, 6), (1, 2)), "line\nsec", "the rest of row 0, then row 1's start");
+        assert_eq!(s.text((0, 0), (3, 19)), "first line\nsecond\n\nfourth row");
+        assert_eq!(s.text((1, 0), (1, 19)), "second");
+        assert_eq!(s.text((0, 2), (0, 2)), "r");
+        assert_eq!(s.text((1, 10), (1, 15)), "", "only blanks");
+        assert_eq!(s.text((2, 0), (1, 0)), "", "start after end");
+        assert_eq!(s.text((3, 0), (9, 50)), "fourth row", "clamped to the screen");
+        assert_eq!(s.text((1, 0), (2, 19)), "second", "no trailing blank rows");
+    }
+
+    #[test]
+    fn text_counts_wide_chars_once() {
+        let mut s = Screen::new(2, 20);
+        // 'Ａ' (U+FF21) and '🦀' are two columns wide; then "x" and an
+        // 'e' with a combining acute accent.
+        s.feed("Ａ🦀xe\u{301}".as_bytes());
+        assert_eq!(s.text((0, 0), (0, 19)), "Ａ🦀xe\u{301}");
+        assert_eq!(s.text((0, 1), (0, 2)), "🦀", "from a spacer to the next wide char");
+        let row = s.row_chars(0);
+        assert_eq!(&row[..6], &['Ａ', 'Ａ', '🦀', '🦀', 'x', 'e']);
+        assert_eq!(row.len(), 20);
+        assert!(s.row_chars(5).is_empty());
+    }
+
+    #[test]
+    fn text_joins_soft_wrapped_rows() {
+        let mut s = Screen::new(4, 10);
+        // 14 chars wrap after 10; then a hard newline.
+        s.feed(b"abcdefghijklmn\r\nnext");
+        assert_eq!(s.text((0, 0), (2, 9)), "abcdefghijklmn\nnext");
+        // A row that is exactly full but ends in a real newline is not joined.
+        let mut s = Screen::new(4, 10);
+        s.feed(b"0123456789\r\nnext");
+        assert_eq!(s.text((0, 0), (1, 9)), "0123456789\nnext");
+        // Blanks at the wrap point are content, not trailing space.
+        let mut s = Screen::new(4, 10);
+        s.feed(b"abcdefgh  ij");
+        assert_eq!(s.text((0, 0), (1, 9)), "abcdefgh  ij");
     }
 
     /// OSC 0 / OSC 2 title sequences are captured and exposed via `title()`.

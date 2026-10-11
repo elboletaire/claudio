@@ -6,7 +6,8 @@
 //!
 //! ```toml
 //! [ui]
-//! notify = true   # desktop notifications for background sessions
+//! notify = true          # desktop notifications for background sessions
+//! copy_on_select = true  # drag in a pane to select and copy (OSC 52)
 //!
 //! [claude]
 //! allow_skip_permissions = true   # pass --allow-dangerously-skip-permissions
@@ -37,6 +38,12 @@ pub struct UiSection {
     /// session enters NeedsApproval / NeedsInput / Error.
     #[serde(default = "default_notify")]
     pub notify: bool,
+    /// Copy on select: a left-button drag in a session pane selects text
+    /// (double-click a word, triple-click a row) and copies it to the
+    /// clipboard through OSC 52. Only while the session has not turned on
+    /// mouse reporting; those clicks go to the session as before.
+    #[serde(default = "default_true")]
+    pub copy_on_select: bool,
 }
 
 fn default_notify() -> bool {
@@ -45,7 +52,10 @@ fn default_notify() -> bool {
 
 impl Default for UiSection {
     fn default() -> Self {
-        UiSection { notify: true }
+        UiSection {
+            notify: true,
+            copy_on_select: true,
+        }
     }
 }
 
@@ -213,6 +223,7 @@ mod tests {
         let path = dir.join("config.toml"); // does not exist
         let cfg = load_from(&path);
         assert!(cfg.ui.notify);
+        assert!(cfg.ui.copy_on_select);
         assert!(cfg.keys.is_empty());
         assert!(cfg.claude.allow_skip_permissions);
         assert_eq!(cfg.claude.update_check, UpdatePolicy::Ask);
@@ -241,6 +252,7 @@ mod tests {
         let toml = r#"
 [ui]
 notify = false
+copy_on_select = false
 
 [keys]
 overview = "alt+g"
@@ -252,6 +264,7 @@ default = "x"
         let file: ConfigFile = toml::from_str(toml).unwrap();
         let ui = file.ui.unwrap();
         assert!(!ui.notify);
+        assert!(!ui.copy_on_select);
         let keys = file.keys.unwrap();
         assert_eq!(keys.get("overview").map(String::as_str), Some("alt+g"));
         assert_eq!(keys.get("help").map(String::as_str), Some("alt+h"));
