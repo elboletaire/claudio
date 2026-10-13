@@ -353,9 +353,10 @@ impl Keymap {
         if key.kind == KeyEventKind::Release {
             return None;
         }
+        let (code, mods) = canonical_key(key.code, key.modifiers);
         self.bindings
             .iter()
-            .find(|b| b.scope == scope && b.code == key.code && b.mods == key.modifiers)
+            .find(|b| b.scope == scope && b.code == code && b.mods == mods)
             .map(|b| b.action)
     }
 
@@ -475,6 +476,18 @@ pub fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
         other => return Err(format!("unknown key '{other}'")),
     };
     Ok((code, mods))
+}
+
+/// Fold Shift+letter into the uppercase letter, the form [`parse_key_spec`]
+/// stores. Terminals report Alt+Shift+q as `Char('Q')` with `ALT | SHIFT`
+/// (legacy encoding) or `Char('q')` with `ALT | SHIFT` (kitty protocol).
+fn canonical_key(code: KeyCode, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    match code {
+        KeyCode::Char(c) if mods.contains(KeyModifiers::SHIFT) && c.is_ascii_alphabetic() => {
+            (KeyCode::Char(c.to_ascii_uppercase()), mods - KeyModifiers::SHIFT)
+        }
+        _ => (code, mods),
+    }
 }
 
 /// Human-readable key string for a binding (e.g. `"Alt+←"`, `"Alt+G"`).
@@ -669,6 +682,24 @@ mod tests {
             parse_key_spec("alt+shift+g").unwrap(),
             (KeyCode::Char('G'), KeyModifiers::ALT)
         );
+    }
+
+    #[test]
+    fn alt_shift_letter_override_matches_terminal_events() {
+        let overrides = [("quit".to_owned(), "alt+shift+q".to_owned())].into();
+        let mut notices = Vec::new();
+        let km = Keymap::build(&overrides, &mut notices);
+        assert!(notices.is_empty(), "{notices:?}");
+        let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        // Legacy encoding (ESC Q) and kitty protocol (base key + SHIFT).
+        for c in ['Q', 'q'] {
+            assert_eq!(
+                km.lookup(&key(KeyCode::Char(c), alt_shift)),
+                Some(Action::Quit),
+                "Char({c:?}) with ALT|SHIFT"
+            );
+        }
+        assert_eq!(km.lookup(&key(KeyCode::Char('q'), KeyModifiers::ALT)), None);
     }
 
     #[test]
