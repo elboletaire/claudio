@@ -106,10 +106,14 @@ fn copy_to_clipboard(text: &str) {
 /// What the UI is started as.
 enum Launch {
     /// The session manager, with a startup proxy override for new sessions.
-    Manager(crate::proxy::ProxyChoice),
+    Manager {
+        proxy: crate::proxy::ProxyChoice,
+        first_party: bool,
+    },
     /// `claudio --plain`: one bare session; `args` go to claude.
     Plain {
         proxy: crate::proxy::ProxyChoice,
+        first_party: bool,
         args: Vec<String>,
     },
 }
@@ -127,7 +131,7 @@ enum Start {
 
 /// Run the manager until the user quits.
 pub fn run() -> ExitCode {
-    run_with_proxy(crate::proxy::ProxyChoice::Default)
+    run_with_proxy(crate::proxy::ProxyChoice::Default, false)
 }
 
 /// Like [`run`] but applies a startup proxy override to every new session.
@@ -135,15 +139,28 @@ pub fn run() -> ExitCode {
 /// - `Direct`  → new sessions never use a proxy (--no-proxy).
 /// - `Profile` → new sessions always pre-select that profile (--proxy <name>).
 /// - `Default` → wizard pre-selects the config.toml default, if any.
-pub fn run_with_proxy(proxy_override: crate::proxy::ProxyChoice) -> ExitCode {
-    run_launch(Launch::Manager(proxy_override))
+///
+/// `first_party` (--first-party) makes every session of this run first-party.
+pub fn run_with_proxy(proxy_override: crate::proxy::ProxyChoice, first_party: bool) -> ExitCode {
+    run_launch(Launch::Manager {
+        proxy: proxy_override,
+        first_party,
+    })
 }
 
 /// `claudio --plain`: run claude alone, full screen, with the proxy `proxy`
 /// picks, and exit with its status. The manager's help, proxy stats, history
 /// and reset keys work; the rest of the keyboard is claude's.
-pub fn run_plain(proxy: crate::proxy::ProxyChoice, args: Vec<String>) -> ExitCode {
-    run_launch(Launch::Plain { proxy, args })
+pub fn run_plain(
+    proxy: crate::proxy::ProxyChoice,
+    first_party: bool,
+    args: Vec<String>,
+) -> ExitCode {
+    run_launch(Launch::Plain {
+        proxy,
+        first_party,
+        args,
+    })
 }
 
 fn run_launch(launch: Launch) -> ExitCode {
@@ -166,9 +183,13 @@ async fn main(launch: Launch) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
     let config = crate::config::load();
     let mut key_notices = Vec::new();
-    let (proxy_override, plain) = match launch {
-        Launch::Manager(proxy) => (proxy, None),
-        Launch::Plain { proxy, args } => {
+    let (proxy_override, first_party, plain) = match launch {
+        Launch::Manager { proxy, first_party } => (proxy, first_party, None),
+        Launch::Plain {
+            proxy,
+            first_party,
+            args,
+        } => {
             let cwd = std::env::current_dir()
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".to_owned());
@@ -177,7 +198,7 @@ async fn main(launch: Launch) -> ExitCode {
                 args,
                 cwd,
             };
-            (proxy, Some(start))
+            (proxy, first_party, Some(start))
         }
     };
     let keymap = match plain {
@@ -215,6 +236,7 @@ async fn main(launch: Launch) -> ExitCode {
         notify: config.ui.notify && plain.is_none(),
         copy_on_select: config.ui.copy_on_select,
         proxy_override,
+        first_party,
         proxy_profiles,
         proxy_default,
         claude: config.claude,
@@ -839,6 +861,7 @@ fn run_effect(
             host,
             msg,
             proxy_name,
+            first_party,
             to,
         } => {
             // Resolve the client now (synchronous, cheap) so we can move it
@@ -860,6 +883,7 @@ fn run_effect(
                 let env = crate::proxy::resolve::proxy_env_for(
                     Some(&proxy_name),
                     cfg.as_ref(),
+                    first_party,
                 );
                 match env {
                     Err(e) => {

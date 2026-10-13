@@ -50,6 +50,9 @@ pub struct SessionView {
     pub attached: bool,
     /// Proxy profile name (None = no proxy). Only the name, never the token.
     pub proxy: Option<String>,
+    /// Launched with `--first-party` (a respawn keeps it, even in a run
+    /// without the flag). The profile's own `first_party` is read live.
+    pub first_party: bool,
     /// Git branch of the session's cwd, if any.
     pub branch: Option<String>,
     /// Short human-readable model name from the last assistant turn.
@@ -92,6 +95,7 @@ impl SessionView {
             mirror: Screen::new(size.0, size.1),
             attached: false,
             proxy: None,
+            first_party: false,
             branch: None,
             model: None,
             context_tokens: None,
@@ -124,6 +128,7 @@ impl SessionView {
             claude_session_id: saved.claude_session_id,
             created_at: saved.created_at,
             proxy: saved.proxy,
+            first_party: saved.first_party,
             ..SessionView::new(saved.id, saved.host, saved.cwd, saved.kind, size)
         }
     }
@@ -167,6 +172,7 @@ impl SessionView {
             claude_session_id: self.claude_session_id.clone(),
             created_at: self.created_at,
             proxy: self.proxy.clone(),
+            first_party: self.first_party,
             kind: self.kind,
         }
     }
@@ -339,10 +345,13 @@ impl App {
             name: None,
             args,
         };
-        self.send_spawn(&host, req, proxy.as_deref())?;
+        // Only a proxied claude session has a first-party choice to keep.
+        let first_party = self.first_party && kind == SessionKind::Claude && proxy.is_some();
+        self.send_spawn(&host, req, proxy.as_deref(), first_party)?;
         let view = SessionView {
             created_at: self.now,
             proxy,
+            first_party,
             ..SessionView::new(id, host, cwd, kind, self.pane_size())
         };
         self.sessions.insert(at, view);
@@ -365,6 +374,7 @@ impl App {
         host: &str,
         req: SpawnRequest,
         proxy: Option<&str>,
+        first_party: bool,
     ) -> Result<(), String> {
         let (rows, cols) = self.pane_size();
         let SpawnRequest {
@@ -396,7 +406,13 @@ impl App {
             // `--plain`'s session is not one for a manager to show.
             ephemeral: self.mode == Mode::Plain,
         };
-        self.send_with_proxy(host, Msg::Spawn(spec), proxy, ReplyTo::Spawned(id))
+        self.send_with_proxy(
+            host,
+            Msg::Spawn(spec),
+            proxy,
+            first_party,
+            ReplyTo::Spawned(id),
+        )
     }
 
     /// Send `msg` (a `Spawn` or `Respawn` with an empty env) to `host` with
@@ -408,6 +424,7 @@ impl App {
         host: &str,
         msg: Msg,
         proxy: Option<&str>,
+        first_party: bool,
         to: ReplyTo,
     ) -> Result<(), String> {
         match proxy {
@@ -416,11 +433,12 @@ impl App {
                     host: host.to_owned(),
                     msg,
                     proxy_name: name.to_owned(),
+                    first_party,
                     to: to.deferred(),
                 });
             }
             _ => {
-                let msg = msg.with_env(self.proxy_env_for(proxy)?);
+                let msg = msg.with_env(self.proxy_env_for(proxy, first_party)?);
                 self.request(host, msg, to);
             }
         }
@@ -494,10 +512,14 @@ impl App {
     /// the same session again (see [`Msg::Respawn`]); the tab stays.
     pub(super) fn reset_session(&mut self, id: SessionId, fresh: bool) {
         let Some(i) = self.index_of(id) else { return };
-        let (host, kind, proxy) = {
+        let (host, kind, proxy, stored) = {
             let v = &self.sessions[i];
-            (v.host.clone(), v.kind, v.proxy.clone())
+            (v.host.clone(), v.kind, v.proxy.clone(), v.first_party)
         };
+        // A terminal never carries the proxy env.
+        let proxy = proxy.filter(|_| kind == SessionKind::Claude);
+        // A run's `--first-party` applies to the sessions it restarts too.
+        let first_party = (stored || self.first_party) && proxy.is_some();
         let (rows, cols) = self.pane_size();
         let msg = Msg::Respawn(RespawnSpec {
             id,
@@ -506,10 +528,21 @@ impl App {
             rows,
             cols,
         });
-        // A terminal never carries the proxy env.
-        let proxy = proxy.filter(|_| kind == SessionKind::Claude);
-        if let Err(e) = self.send_with_proxy(&host, msg, proxy.as_deref(), ReplyTo::Respawned(id)) {
-            self.notify(format!("cannot restart: {e}"));
+        match self.send_with_proxy(
+            &host,
+            msg,
+            proxy.as_deref(),
+            first_party,
+            ReplyTo::Respawned(id),
+        ) {
+            Ok(()) => {
+                // Keep the effective choice, so a later restart keeps the env.
+                if first_party != stored {
+                    self.sessions[i].first_party = first_party;
+                    self.save();
+                }
+            }
+            Err(e) => self.notify(format!("cannot restart: {e}")),
         }
     }
 
@@ -662,8 +695,13 @@ impl App {
         }
 
         let mut recovered = Vec::new();
-        for r in merged {
+        for mut r in merged {
             if let Some(args) = r.respawn {
+                // A run's `--first-party` applies to the proxied claude
+                // sessions it respawns; the restored record keeps the choice.
+                if r.saved.kind == SessionKind::Claude && r.saved.proxy.is_some() {
+                    r.saved.first_party |= self.first_party;
+                }
                 let req = SpawnRequest {
                     id: r.saved.id,
                     kind: r.saved.kind,
@@ -671,7 +709,10 @@ impl App {
                     name: r.saved.name.clone(),
                     args,
                 };
-                if let Err(e) = self.send_spawn(&r.saved.host, req, r.saved.proxy.as_deref()) {
+                let first_party = r.saved.first_party;
+                if let Err(e) =
+                    self.send_spawn(&r.saved.host, req, r.saved.proxy.as_deref(), first_party)
+                {
                     self.notify(format!("cannot respawn '{}': {e}", r.saved.cwd));
                 }
             }

@@ -105,6 +105,10 @@ pub struct SavedSession {
     /// The proxy profile name used by this session (profile name only, never the token).
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Launched first-party (`--first-party`). Omitted when false, so a
+    /// state.json without it reads as gateway, as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first_party: bool,
     /// A terminal tab never resumes and never gets proxy env.
     #[serde(default)]
     pub kind: SessionKind,
@@ -219,6 +223,7 @@ fn recover_with_host(saved: Option<&SavedSession>, info: &SessionInfo, host: &st
             claude_session_id,
             created_at: info.created_at,
             proxy: saved.and_then(|s| s.proxy.clone()),
+            first_party: saved.is_some_and(|s| s.first_party),
             // The daemon's journal is authoritative.
             kind: info.kind,
         },
@@ -233,6 +238,24 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    #[test]
+    fn first_party_is_saved_only_when_set() {
+        let mut s = saved(Uuid::new_v4(), None, None);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("first_party"), "{json}");
+
+        s.first_party = true;
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"first_party\":true"), "{json}");
+        let back: SavedSession = serde_json::from_str(&json).unwrap();
+        assert!(back.first_party);
+
+        // A state.json written before the field reads as gateway.
+        let old = json.replace(",\"first_party\":true", "");
+        let back: SavedSession = serde_json::from_str(&old).unwrap();
+        assert!(!back.first_party);
+    }
+
     fn saved(id: Uuid, name: Option<&str>, csid: Option<&str>) -> SavedSession {
         SavedSession {
             id,
@@ -242,6 +265,7 @@ mod tests {
             claude_session_id: csid.map(Into::into),
             created_at: 1,
             proxy: None,
+            first_party: false,
             kind: SessionKind::Claude,
         }
     }

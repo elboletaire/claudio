@@ -335,7 +335,13 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20Flags (consumed by claudio, not forwarded to claude):\n\
 \x20  -p, --print                 Emulate print mode via the interactive PTY (claudio never runs `claude -p`).\n\
 \x20  --api                       Run the OpenAI-compatible API server (POST /v1/chat/completions, /v1/models).\n\
-\x20  --plain [--proxy NAME|--no-proxy] [claude args…]\n\
+\x20  [--proxy NAME|--no-proxy] [--first-party]\n\
+\x20                              Open the session manager. --proxy NAME pre-selects a proxy profile for new\n\
+\x20                              sessions, --no-proxy starts them without one. --first-party makes every\n\
+\x20                              session of this run first-party (Monitor, /advisor, WebSearch), whatever\n\
+\x20                              the profile says; a session keeps it across restarts. Gateway mode is the\n\
+\x20                              default. See the README (proxy section).\n\
+\x20  --plain [--proxy NAME|--no-proxy] [--first-party] [claude args…]\n\
 \x20                              Run one plain interactive claude, full screen, with the proxy env of a\n\
 \x20                              manager session: no tabs, status bar or wizard. Alt+h (help), Alt+s\n\
 \x20                              (proxy stats), Alt+l (git history) and Alt+e (restart) are claudio's;\n\

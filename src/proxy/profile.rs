@@ -10,6 +10,7 @@
 //! [proxy.profiles.work]
 //! url   = "https://proxy.example.com"
 //! token = "…"
+//! first_party = true  # optional: see `Profile::first_party`
 //! ```
 //!
 //! The env var `CLAUDIO_PROXY_URL=<token>@<host>` creates an ephemeral profile
@@ -33,6 +34,17 @@ pub struct Profile {
     pub url: String,
     /// Bearer token, never logged.
     pub token: String,
+    /// Opt into first-party mode (`first_party = true`). Without it a session
+    /// uses the gateway env, which turns off Claude Code's feature flags
+    /// (Monitor, /advisor, WebSearch). With it the session is first-party
+    /// against the proxy URL, which needs the proxy to pass Anthropic's
+    /// server-side tools through.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub first_party: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl fmt::Debug for Profile {
@@ -40,6 +52,7 @@ impl fmt::Debug for Profile {
         f.debug_struct("Profile")
             .field("url", &self.url)
             .field("token", &"[redacted]")
+            .field("first_party", &self.first_party)
             .finish()
     }
 }
@@ -215,7 +228,14 @@ fn is_localhost(host: &str) -> bool {
 pub fn from_env() -> Option<(&'static str, Profile)> {
     let raw = std::env::var("CLAUDIO_PROXY_URL").ok()?;
     match parse_proxy_url(&raw) {
-        Ok((url, token)) => Some(("env", Profile { url, token })),
+        Ok((url, token)) => Some((
+            "env",
+            Profile {
+                url,
+                token,
+                first_party: false,
+            },
+        )),
         Err(e) => {
             eprintln!("claudio: CLAUDIO_PROXY_URL: {e}");
             None
@@ -321,6 +341,7 @@ mod tests {
         let p = Profile {
             url: "https://x.net".into(),
             token: "supersecret".into(),
+            first_party: false,
         };
         let dbg = format!("{p:?}");
         assert!(!dbg.contains("supersecret"));
@@ -343,6 +364,7 @@ mod tests {
             Profile {
                 url: "https://proxy.example.com".into(),
                 token: "topsecret".into(),
+                first_party: false,
             },
         );
         save_to(&path, &sec).unwrap();
@@ -359,6 +381,46 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // ── first_party ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn first_party_round_trips_and_defaults_to_false() {
+        let dir =
+            std::env::temp_dir().join(format!("claudio-proxy-gw-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // A profile without the key loads as false and saves without the key.
+        std::fs::write(
+            &path,
+            "[proxy.profiles.plain]\nurl = \"https://a.net\"\ntoken = \"t1\"\n",
+        )
+        .unwrap();
+        let loaded = load_from(&path).unwrap();
+        assert!(!loaded.profiles["plain"].first_party);
+        save_to(&path, &loaded).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("first_party"), "saved: {saved}");
+
+        // first_party = true round-trips.
+        let mut sec = ProxySection::default();
+        sec.profiles.insert(
+            "fp".into(),
+            Profile {
+                url: "https://b.net".into(),
+                token: "t2".into(),
+                first_party: true,
+            },
+        );
+        save_to(&path, &sec).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("first_party = true"), "saved: {saved}");
+        let loaded = load_from(&path).unwrap();
+        assert!(loaded.profiles["fp"].first_party);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // ── masked_token ──────────────────────────────────────────────────────────
 
     #[test]
@@ -366,6 +428,7 @@ mod tests {
         let p = |t: &str| Profile {
             url: "u".into(),
             token: t.into(),
+            first_party: false,
         };
         assert_eq!(p("abcdefghwxyz").masked_token(), "abcd…wxyz");
         assert_eq!(p("ab").masked_token(), "**");
@@ -378,6 +441,7 @@ mod tests {
         let p = Profile {
             url: "u".into(),
             token: "🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑".into(),
+            first_party: false,
         };
         // Should not panic; result length varies by char count.
         let masked = p.masked_token();
@@ -386,6 +450,7 @@ mod tests {
         let p2 = Profile {
             url: "u".into(),
             token: "🔑🔑".into(),
+            first_party: false,
         };
         assert_eq!(p2.masked_token(), "**");
     }

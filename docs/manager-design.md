@@ -305,6 +305,15 @@ The env goes through `Spawn.env` and is redacted from all daemon logs:
 - `API_TIMEOUT_MS`
 - `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL`
 
+That is the default, gateway mode, where Claude Code turns its feature flags
+off. A first-party session (`first_party = true` on the profile, or
+`--first-party` for one run) is this list without `CLAUDE_CODE_USE_GATEWAY` and
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, plus `DISABLE_AUTOUPDATER=1` and
+`ENABLE_TOOL_SEARCH=true` (tool search stays on: Claude Code turns it off for a
+non-Anthropic base URL otherwise). `env_diff` drops an inherited
+`CLAUDE_CODE_USE_GATEWAY` from a first-party env; an inherited
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is kept.
+
 `ANTHROPIC_API_KEY` is unset. Note that `/proc/<pid>/environ` is readable by
 the same uid and root.
 

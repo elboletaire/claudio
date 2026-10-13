@@ -2,7 +2,9 @@
 //!
 //! [`session_env`] is a pure function: it takes the profile and an optional
 //! config response from the proxy and returns the `(key, value)` pairs that
-//! [`crate::proto::SpawnSpec::env`] should carry.
+//! [`crate::proto::SpawnSpec::env`] should carry. A profile with
+//! `first_party = true` gets the first-party env instead of the gateway one
+//! (see [`session_env`]).
 //!
 //! Built-in fallback model defaults, used when the proxy is unreachable or
 //! does not provide `/v1/claudio/config`:
@@ -29,6 +31,20 @@ pub const DEFAULT_HAIKU: &str = "claude-haiku-5-5[1m]";
 /// The `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` are always added from
 /// the profile itself, not from the proxy config (the proxy cannot know our
 /// token's URL).
+///
+/// The default is gateway mode: `CLAUDE_CODE_USE_GATEWAY` and
+/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` are set. Claude Code turns its
+/// feature flags off in that mode (Monitor, /advisor, WebSearch).
+///
+/// With `profile.first_party` the session is first-party against the proxy
+/// URL instead: both gateway variables are omitted, so the feature flags stay
+/// on. Two more variables are set in that mode:
+/// - `DISABLE_AUTOUPDATER=1`: claude must not update itself behind claudio's
+///   `[claude] update_check`.
+/// - `ENABLE_TOOL_SEARCH=true`: Claude Code turns tool search off for a
+///   non-Anthropic base URL, in case the proxy drops `tool_reference` blocks.
+///   claude-proxy passes them through, so it stays on and every request
+///   carries only the tools it needs.
 pub fn session_env(profile: &Profile, config: Option<&ConfigResponse>) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
 
@@ -36,19 +52,27 @@ pub fn session_env(profile: &Profile, config: Option<&ConfigResponse>) -> Vec<(S
     env.push(("ANTHROPIC_BASE_URL".into(), profile.url.clone()));
     env.push(("ANTHROPIC_AUTH_TOKEN".into(), profile.token.clone()));
 
-    // Fixed gateway knobs.
-    env.push(("CLAUDE_CODE_USE_GATEWAY".into(), "1".into()));
+    // Gateway mode only: first-party sessions keep Claude Code's feature flags.
+    if !profile.first_party {
+        env.push(("CLAUDE_CODE_USE_GATEWAY".into(), "1".into()));
+    }
     env.push((
         "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".into(),
         "1".into(),
     ));
     env.push(("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "1000000".into()));
     env.push(("CLAUDE_CODE_GATEWAY_HINT_HEADERS".into(), "1".into()));
-    env.push((
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
-        "1".into(),
-    ));
+    if !profile.first_party {
+        env.push((
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+            "1".into(),
+        ));
+    }
     env.push(("API_TIMEOUT_MS".into(), "30000".into()));
+    if profile.first_party {
+        env.push(("DISABLE_AUTOUPDATER".into(), "1".into()));
+        env.push(("ENABLE_TOOL_SEARCH".into(), "true".into()));
+    }
 
     // Model defaults: start from built-in fallbacks, then let the proxy
     // config override key by key.
@@ -96,10 +120,20 @@ pub struct EnvDiff<'a> {
 /// Scrubs the markers of a parent claude session (see
 /// [`crate::claude::SESSION_MARKERS`]). A proxy token replaces any
 /// `ANTHROPIC_API_KEY`, which would otherwise win over it.
+///
+/// A first-party proxy env (no `CLAUDE_CODE_USE_GATEWAY`, see
+/// [`session_env`]) also drops an inherited `CLAUDE_CODE_USE_GATEWAY`: it
+/// would turn the feature flags off again. An inherited
+/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is kept, since it may be set on
+/// purpose; it turns the feature flags off too, so it has to be unset by hand
+/// for first-party sessions.
 pub fn env_diff(env: &[(String, String)]) -> EnvDiff<'_> {
     let mut remove = crate::claude::SESSION_MARKERS.to_vec();
     if env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN") {
         remove.push("ANTHROPIC_API_KEY");
+        if !env.iter().any(|(k, _)| k == "CLAUDE_CODE_USE_GATEWAY") {
+            remove.push("CLAUDE_CODE_USE_GATEWAY");
+        }
     }
     EnvDiff { remove, set: env }
 }
@@ -115,6 +149,14 @@ mod tests {
         Profile {
             url: url.into(),
             token: token.into(),
+            first_party: false,
+        }
+    }
+
+    fn first_party_profile(url: &str, token: &str) -> Profile {
+        Profile {
+            first_party: true,
+            ..profile(url, token)
         }
     }
 
@@ -222,22 +264,93 @@ mod tests {
     }
 
     #[test]
-    fn required_gateway_flags_present() {
-        let p = profile("https://x.net", "tok");
-        let env = session_env(&p, None);
+    fn gateway_output_is_unchanged() {
+        // Must match what origin/main produces, pair for pair and in order.
+        let env = session_env(&profile("https://x.net", "tok"), None);
+        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
         assert_eq!(
-            env_get(&env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
-            Some("1")
+            env,
+            [
+                pair("ANTHROPIC_BASE_URL", "https://x.net"),
+                pair("ANTHROPIC_AUTH_TOKEN", "tok"),
+                pair("CLAUDE_CODE_USE_GATEWAY", "1"),
+                pair("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1"),
+                pair("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000"),
+                pair("CLAUDE_CODE_GATEWAY_HINT_HEADERS", "1"),
+                pair("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+                pair("API_TIMEOUT_MS", "30000"),
+                pair("ANTHROPIC_DEFAULT_FABLE_MODEL", DEFAULT_FABLE),
+                pair("ANTHROPIC_DEFAULT_OPUS_MODEL", DEFAULT_OPUS),
+                pair("ANTHROPIC_DEFAULT_SONNET_MODEL", DEFAULT_SONNET),
+                pair("ANTHROPIC_DEFAULT_HAIKU_MODEL", DEFAULT_HAIKU),
+            ]
         );
-        assert_eq!(env_get(&env, "CLAUDE_CODE_GATEWAY_HINT_HEADERS"), Some("1"));
+    }
+
+    #[test]
+    fn first_party_env_omits_gateway_knobs_and_keeps_the_rest() {
+        let env = session_env(&first_party_profile("https://x.net", "tok"), None);
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
-            env_get(&env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-            Some("1")
+            keys,
+            [
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+                "CLAUDE_CODE_GATEWAY_HINT_HEADERS",
+                "API_TIMEOUT_MS",
+                "DISABLE_AUTOUPDATER",
+                "ENABLE_TOOL_SEARCH",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            ]
         );
+        assert_eq!(env_get(&env, "ANTHROPIC_BASE_URL"), Some("https://x.net"));
+        assert_eq!(env_get(&env, "ANTHROPIC_AUTH_TOKEN"), Some("tok"));
+        assert_eq!(env_get(&env, "DISABLE_AUTOUPDATER"), Some("1"));
+        assert_eq!(env_get(&env, "ENABLE_TOOL_SEARCH"), Some("true"));
         assert_eq!(
-            env_get(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
-            Some("1000000")
+            env_get(&env, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(DEFAULT_OPUS)
         );
-        assert_eq!(env_get(&env, "API_TIMEOUT_MS"), Some("30000"));
+    }
+
+    #[test]
+    fn first_party_env_with_config_still_overrides_models() {
+        let mut cfg = ConfigResponse::default();
+        cfg.env.insert(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
+            "claude-opus-99[1m]".into(),
+        );
+        let env = session_env(&first_party_profile("https://x.net", "tok"), Some(&cfg));
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some("claude-opus-99[1m]")
+        );
+    }
+
+    #[test]
+    fn env_diff_removes_inherited_gateway_use_for_first_party_only() {
+        let env = session_env(&first_party_profile("https://x.net", "tok"), None);
+        let diff = env_diff(&env);
+        assert!(diff.remove.contains(&"CLAUDE_CODE_USE_GATEWAY"));
+        assert!(diff.remove.contains(&"ANTHROPIC_API_KEY"));
+        // A user's own NONESSENTIAL_TRAFFIC setting is not touched.
+        assert!(!diff
+            .remove
+            .contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
+    }
+
+    #[test]
+    fn env_diff_keeps_gateway_vars_for_gateway_envs() {
+        let env = session_env(&profile("https://x.net", "tok"), None);
+        let diff = env_diff(&env);
+        assert!(!diff.remove.contains(&"CLAUDE_CODE_USE_GATEWAY"));
+        assert!(!diff
+            .remove
+            .contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
     }
 }

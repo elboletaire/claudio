@@ -171,13 +171,7 @@ fn cmd_login(args: &[String]) -> ExitCode {
         }
     };
     let is_first = sec.profiles.is_empty();
-    sec.profiles.insert(
-        name.clone(),
-        Profile {
-            url: url.clone(),
-            token,
-        },
-    );
+    store_login(&mut sec, &name, url.clone(), token);
     if is_first || sec.default.is_none() {
         sec.default = Some(name.clone());
         println!("  Set '{name}' as default proxy.");
@@ -188,6 +182,20 @@ fn cmd_login(args: &[String]) -> ExitCode {
     }
     println!("  Saved profile '{name}'.");
     ExitCode::SUCCESS
+}
+
+/// Store a logged-in profile, replacing any profile of that name. A re-login
+/// keeps the profile's `first_party` mode: only the URL and token change.
+fn store_login(sec: &mut profile::ProxySection, name: &str, url: String, token: String) {
+    let first_party = sec.profiles.get(name).is_some_and(|p| p.first_party);
+    sec.profiles.insert(
+        name.to_owned(),
+        Profile {
+            url,
+            token,
+            first_party,
+        },
+    );
 }
 
 /// Read a token with no-echo (raw TTY or plain stdin).
@@ -522,4 +530,39 @@ fn cmd_use(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relogin_keeps_first_party_mode() {
+        let mut sec = profile::ProxySection::default();
+        sec.profiles.insert(
+            "work".into(),
+            Profile {
+                url: "https://old.example.net".into(),
+                token: "old".into(),
+                first_party: true,
+            },
+        );
+        store_login(
+            &mut sec,
+            "work",
+            "https://new.example.net".into(),
+            "new".into(),
+        );
+        let p = &sec.profiles["work"];
+        assert_eq!(p.url, "https://new.example.net");
+        assert_eq!(p.token, "new");
+        assert!(p.first_party);
+    }
+
+    #[test]
+    fn new_profile_is_gateway() {
+        let mut sec = profile::ProxySection::default();
+        store_login(&mut sec, "work", "https://a.example.net".into(), "t".into());
+        assert!(!sec.profiles["work"].first_party);
+    }
 }

@@ -87,11 +87,18 @@ claudio                                         # new sessions now use the proxy
 - `claudio --no-proxy` or `claudio --proxy <profile>` overrides the default for one run.
 - `CLAUDIO_PROXY_URL=<token>@proxy.example.com claudio` uses a proxy for one run without saving a profile.
 - The status bar shows which upstream credential the session is running on, and `Alt+s` opens the proxy stats.
+- Proxy sessions use gateway mode by default: `ANTHROPIC_BASE_URL` points at the proxy, and Claude Code gets `CLAUDE_CODE_USE_GATEWAY=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Claude Code turns its feature flags off in that mode, so Monitor, `/advisor`, WebSearch and PushNotification are unavailable.
+- First-party mode is opt-in, for a profile (`first_party = true` in `config.toml`, under `[proxy.profiles.<name>]`) or for one run (`claudio --first-party`, also with `--proxy` and `--plain`). The session then runs as a first-party Claude Code client: the gateway variables are left out, so the feature flags stay on and Monitor, `/advisor`, WebSearch, PushNotification and the other flag-gated features work. WebSearch works only if the proxy passes Anthropic's server-side web search tool through. The session also gets `DISABLE_AUTOUPDATER=1`, so claude does not update itself behind claudio's `[claude] update_check`, and `ENABLE_TOOL_SEARCH=true`, which keeps tool search on (Claude Code turns it off for a non-Anthropic base URL; claude-proxy passes the `tool_reference` blocks through).
+- The cost of first-party mode: Claude Code's telemetry and feature-flag requests go to api.anthropic.com, not only to the proxy, and on a host where claude has never been set up, the onboarding screens may appear once.
+- A session started with `--first-party` keeps it when it is restarted (`Alt+e`) or restored after a claudio restart, so its env does not change under it.
+
+> [!NOTE]
+> An exported `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is kept, and it turns Claude Code's feature flags off as well. Monitor and the other flag-gated features then stay off even with `first_party = true`. Unset it for first-party sessions (`unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`).
 
 ### Just one claude, with the proxy (`--plain`)
 
 ```bash
-claudio --plain [--proxy NAME | --no-proxy] [claude args…]
+claudio --plain [--proxy NAME | --no-proxy] [--first-party] [claude args…]
 ```
 
 One full-screen claude session with the proxy configured: no tabs, no status bar, no saved state. It feels like plain `claude`, and exits when claude does, with claude's exit status. Only four keys are claudio's: `Alt+h` help, `Alt+s` proxy stats, `Alt+l` git history, `Alt+e` restart. Everything else, and every argument, goes to claude.
@@ -100,7 +107,7 @@ One full-screen claude session with the proxy configured: no tabs, no status bar
 
 | Command | What it does |
 |---|---|
-| `claudio` | Open the session manager |
+| `claudio [--proxy NAME\|--no-proxy] [--first-party]` | Open the session manager |
 | `claudio --plain …` | One plain claude session with the proxy configured |
 | `claudio sessions` | List sessions as a table (for scripts) |
 | `claudio daemon status\|stop\|restart` | Inspect or control the background daemon |

@@ -21,8 +21,9 @@ use std::process::{Command, ExitCode};
 /// Variables a running claude sets for its own children. A process started
 /// from inside a claude session inherits them, and a session spawned with them
 /// believes it is a child: it turns off transcript saving (breaking `--resume`)
-/// and talks to the parent's messaging socket. User settings such as
-/// `CLAUDE_CODE_USE_GATEWAY` are deliberately kept.
+/// and talks to the parent's messaging socket. User settings are deliberately
+/// kept, except that a first-party proxy session removes an inherited
+/// `CLAUDE_CODE_USE_GATEWAY` (see `proxy::env::env_diff`).
 pub const SESSION_MARKERS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",

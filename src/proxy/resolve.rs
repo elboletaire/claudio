@@ -31,6 +31,40 @@ impl ProxyChoice {
     }
 }
 
+/// The launch flags that the session manager and `--plain` take before
+/// anything else: the proxy choice and `--first-party`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaunchFlags<'a> {
+    pub choice: ProxyChoice,
+    /// `--first-party`: every session of this run is first-party.
+    pub first_party: bool,
+    /// The arguments after the flags.
+    pub rest: &'a [String],
+}
+
+/// Consume the leading `--proxy NAME`, `--no-proxy` and `--first-party` flags
+/// (in any order). Stops at the first other argument.
+pub fn split_launch_flags(args: &[String]) -> Result<LaunchFlags<'_>, String> {
+    let mut flags = LaunchFlags {
+        choice: ProxyChoice::Default,
+        first_party: false,
+        rest: args,
+    };
+    loop {
+        match flags.rest {
+            [flag, ..] if flag == "--first-party" => flags.first_party = true,
+            [flag] if flag == "--proxy" => return Err("--proxy requires a profile name".into()),
+            [flag, name, ..] if flag == "--proxy" => {
+                flags.choice = ProxyChoice::Profile(name.clone());
+                flags.rest = &flags.rest[1..];
+            }
+            [flag, ..] if flag == "--no-proxy" => flags.choice = ProxyChoice::Direct,
+            _ => return Ok(flags),
+        }
+        flags.rest = &flags.rest[1..];
+    }
+}
+
 /// Load proxy profiles from config.toml and CLAUDIO_PROXY_URL. Returns
 /// `(profile_names, default_name)`. Never panics; returns empty on any error.
 pub fn load_proxy_profiles() -> (Vec<String>, Option<String>) {
@@ -71,16 +105,22 @@ pub fn resolve_profile(name: &str) -> Option<(String, String)> {
 /// - deleted profile
 /// - `"env"` profile but `CLAUDIO_PROXY_URL` is unset
 ///
-/// Returns `Ok(vec![])` when `proxy_name` is `None`.
+/// Returns `Ok(vec![])` when `proxy_name` is `None`. `first_party` (the
+/// `--first-party` flag) makes the session first-party whatever the profile
+/// says.
 pub fn proxy_env_for(
     proxy_name: Option<&str>,
     proxy_config: Option<&ConfigResponse>,
+    first_party: bool,
 ) -> Result<Vec<(String, String)>, String> {
     let Some(name) = proxy_name else {
         return Ok(Vec::new());
     };
     match find_profile(name) {
-        Some(p) => Ok(super::env::session_env(&p, proxy_config)),
+        Some(mut p) => {
+            p.first_party |= first_party;
+            Ok(super::env::session_env(&p, proxy_config))
+        }
         None if name == "env" => {
             Err("proxy profile 'env' requires CLAUDIO_PROXY_URL to be set".to_owned())
         }
@@ -107,6 +147,41 @@ mod tests {
 
     #[test]
     fn no_proxy_name_means_empty_env() {
-        assert_eq!(proxy_env_for(None, None), Ok(Vec::new()));
+        assert_eq!(proxy_env_for(None, None, false), Ok(Vec::new()));
+        assert_eq!(proxy_env_for(None, None, true), Ok(Vec::new()));
+    }
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn launch_flags_are_consumed_in_any_order() {
+        let a = args(&["--first-party", "--proxy", "work", "-c"]);
+        let flags = split_launch_flags(&a).unwrap();
+        assert_eq!(flags.choice, ProxyChoice::Profile("work".into()));
+        assert!(flags.first_party);
+        assert_eq!(flags.rest, &args(&["-c"])[..]);
+
+        let a = args(&["--no-proxy", "--first-party"]);
+        let flags = split_launch_flags(&a).unwrap();
+        assert_eq!(flags.choice, ProxyChoice::Direct);
+        assert!(flags.first_party);
+        assert!(flags.rest.is_empty());
+    }
+
+    #[test]
+    fn launch_flags_default_when_absent() {
+        let a = args(&["--resume", "abc"]);
+        let flags = split_launch_flags(&a).unwrap();
+        assert_eq!(flags.choice, ProxyChoice::Default);
+        assert!(!flags.first_party);
+        assert_eq!(flags.rest, &a[..]);
+    }
+
+    #[test]
+    fn proxy_flag_needs_a_name() {
+        assert!(split_launch_flags(&args(&["--proxy"])).is_err());
+        assert!(split_launch_flags(&args(&["--first-party", "--proxy"])).is_err());
     }
 }

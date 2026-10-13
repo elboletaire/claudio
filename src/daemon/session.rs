@@ -997,6 +997,7 @@ mod tests {
         cmd.env("CLAUDE_CODE_ENTRYPOINT", "cli");
         cmd.env("CLAUDE_CODE_CHILD_SESSION", "1");
         cmd.env("CLAUDE_CODE_USE_GATEWAY", "1");
+        cmd.env("MY_SETTING", "keep");
         cmd.env("ANTHROPIC_API_KEY", "old");
         apply_env(
             &mut cmd,
@@ -1006,11 +1007,11 @@ mod tests {
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_ENTRYPOINT"), None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_CHILD_SESSION"), None);
-        // User settings survive; only per-session markers are scrubbed.
+        // A first-party env drops an inherited gateway flag; user settings survive.
+        assert_eq!(cmd.get_env("CLAUDE_CODE_USE_GATEWAY"), None);
         assert_eq!(
-            cmd.get_env("CLAUDE_CODE_USE_GATEWAY")
-                .and_then(|v| v.to_str()),
-            Some("1")
+            cmd.get_env("MY_SETTING").and_then(|v| v.to_str()),
+            Some("keep")
         );
         assert_eq!(cmd.get_env("ANTHROPIC_API_KEY"), None);
         assert_eq!(cmd.get_env("ANTHROPIC_AUTH_TOKEN"), Some(OsStr::new("tok")));

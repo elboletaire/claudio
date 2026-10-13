@@ -22,6 +22,7 @@ pub fn config() -> AppConfig {
         notify: true,
         copy_on_select: true,
         proxy_override: Default::default(),
+        first_party: false,
         proxy_profiles: Vec::new(),
         proxy_default: None,
         claude: Default::default(),

@@ -154,20 +154,28 @@ fn main() -> std::process::ExitCode {
         return plain::run(&argv[2..]);
     }
 
-    // `claudio [--proxy <name>|--no-proxy]` — open the session manager with a
-    // proxy override applied to every new session.
+    // `claudio [--proxy <name>|--no-proxy] [--first-party]` — open the session
+    // manager with a proxy override and/or first-party mode for every new session.
     if argv.len() == 1 {
         return tui::run();
     }
-    if argv.get(1).map(String::as_str) == Some("--no-proxy") && argv.len() == 2 {
-        return tui::run_with_proxy(proxy::ProxyChoice::Direct);
-    }
-    if argv.get(1).map(String::as_str) == Some("--proxy") {
-        if let Some(name) = argv.get(2).cloned() {
-            return tui::run_with_proxy(proxy::ProxyChoice::Profile(name));
-        }
-        eprintln!("claudio: --proxy requires a profile name");
-        return std::process::ExitCode::FAILURE;
+    if matches!(argv[1].as_str(), "--proxy" | "--no-proxy" | "--first-party") {
+        return match proxy::resolve::split_launch_flags(&argv[1..]) {
+            Ok(flags) if flags.rest.is_empty() => {
+                tui::run_with_proxy(flags.choice, flags.first_party)
+            }
+            Ok(_) => {
+                eprintln!(
+                    "claudio: --proxy, --no-proxy and --first-party open the session manager \
+                     and take no claude arguments; use `claudio --plain …` for one claude"
+                );
+                std::process::ExitCode::FAILURE
+            }
+            Err(msg) => {
+                eprintln!("claudio: {msg}");
+                std::process::ExitCode::FAILURE
+            }
+        };
     }
 
     let args = &argv[1..];

@@ -1050,10 +1050,16 @@ fn test_proxy_env_injection() {
         Some(token.as_str()),
         "ANTHROPIC_AUTH_TOKEN wrong"
     );
+    // Default profiles are gateway mode.
     assert_eq!(
         env_get("CLAUDE_CODE_USE_GATEWAY").as_deref(),
         Some("1"),
         "CLAUDE_CODE_USE_GATEWAY not set"
+    );
+    assert_eq!(
+        env_get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").as_deref(),
+        Some("1"),
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC not set"
     );
     assert_eq!(
         env_get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY").as_deref(),
@@ -1170,6 +1176,16 @@ fn test_proxy_env_injection() {
         env_get2("CLAUDE_CODE_USE_GATEWAY").as_deref(),
         Some("1"),
         "respawned: CLAUDE_CODE_USE_GATEWAY not set"
+    );
+    assert_eq!(
+        env_get2("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").as_deref(),
+        Some("1"),
+        "respawned: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC not set"
+    );
+    assert_eq!(
+        env_get2("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY").as_deref(),
+        Some("1"),
+        "respawned: CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY not set"
     );
 
     tui2.quit(WAIT);
@@ -1898,6 +1914,50 @@ fn test_plain_no_proxy_keeps_api_key() {
     assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
     assert!(!env.contains("ANTHROPIC_AUTH_TOKEN"), "{env}");
     assert!(!env.contains("CLAUDECODE"), "{env}");
+    drop(tui);
+}
+
+/// A proxy profile is gateway by default; `--first-party` makes one run
+/// first-party. Nothing listens on the profile's port, so the config fetch
+/// falls back to the built-in model defaults. An inherited
+/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is removed from the test env.
+#[test]
+fn test_plain_first_party_flag() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("plain.env");
+    harness.write_env_dumping_fake_claude(&env_file);
+    let proxy = "sekret@127.0.0.1:1";
+
+    let tui = harness.start_plain_with(&[], |cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", proxy);
+        cmd.env_remove("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
+    });
+    let env = fs::read_to_string(&env_file).expect("env recorded");
+    assert!(env.contains("CLAUDE_CODE_USE_GATEWAY=1"), "{env}");
+    assert!(
+        env.contains("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"),
+        "{env}"
+    );
+    assert!(!env.contains("DISABLE_AUTOUPDATER="), "{env}");
+    drop(tui);
+
+    let _ = fs::remove_file(&env_file);
+    let tui = harness.start_plain_with(&["--first-party"], |cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", proxy);
+        cmd.env_remove("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
+    });
+    let env = fs::read_to_string(&env_file).expect("env recorded");
+    assert!(!env.contains("CLAUDE_CODE_USE_GATEWAY="), "{env}");
+    assert!(
+        !env.contains("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="),
+        "{env}"
+    );
+    assert!(
+        env.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:1"),
+        "{env}"
+    );
+    assert!(env.contains("DISABLE_AUTOUPDATER=1"), "{env}");
+    assert!(env.contains("ENABLE_TOOL_SEARCH=true"), "{env}");
     drop(tui);
 }
 

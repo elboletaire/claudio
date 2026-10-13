@@ -141,6 +141,8 @@ pub enum Effect {
         /// A `Spawn` or `Respawn` whose `env` is empty; the runner fills it.
         msg: Msg,
         proxy_name: String,
+        /// `--first-party` for this session (see `SessionView::first_party`).
+        first_party: bool,
         to: ReplyTo,
     },
     /// Put this text on the outer terminal's clipboard (OSC 52).
@@ -237,6 +239,8 @@ pub struct App {
     /// Startup proxy override: Direct suppresses the default; Profile forces
     /// a specific profile regardless of per-session selection in the wizard.
     pub proxy_override: ProxyChoice,
+    /// `--first-party`: sessions this run starts are first-party.
+    pub first_party: bool,
     /// Last state for which a desktop notification was sent per session.
     /// Used to debounce: only one notification per session per state change.
     pub notified: HashMap<SessionId, SessionState>,
@@ -299,6 +303,8 @@ pub struct AppConfig {
     pub copy_on_select: bool,
     /// The startup proxy choice (`--proxy` / `--no-proxy`).
     pub proxy_override: ProxyChoice,
+    /// `--first-party`: sessions this run starts are first-party.
+    pub first_party: bool,
     /// The configured proxy profile names, and the default one.
     pub proxy_profiles: Vec<String>,
     pub proxy_default: Option<String>,
@@ -343,6 +349,7 @@ impl App {
             proxy_profiles: cfg.proxy_profiles,
             proxy_default: cfg.proxy_default,
             proxy_override: cfg.proxy_override,
+            first_party: cfg.first_party,
             notified: HashMap::new(),
             notify_enabled: cfg.notify,
             pending_notifs: Vec::new(),
@@ -681,10 +688,12 @@ impl App {
     pub(super) fn proxy_env_for(
         &self,
         proxy_name: Option<&str>,
+        first_party: bool,
     ) -> Result<Vec<(String, String)>, String> {
         crate::proxy::resolve::proxy_env_for(
             proxy_name,
             proxy_name.and_then(|n| self.proxy_config_cached(n)),
+            first_party,
         )
     }
 
@@ -1170,6 +1179,7 @@ mod tests {
             claude_session_id: Some("c9".into()),
             created_at: 1,
             proxy: Some("work".into()),
+            first_party: false,
             kind: SessionKind::Claude,
         };
         let saved = ClientState {
@@ -1731,6 +1741,7 @@ mod tests {
                 claude_session_id: None,
                 created_at: 1,
                 proxy: Some("work".into()),
+                first_party: false,
                 kind: SessionKind::Shell,
             }],
             ..Default::default()
@@ -1863,6 +1874,47 @@ mod tests {
             Effect::SpawnWithProxy { msg: Msg::Respawn(spec), proxy_name, to, .. }
                 if spec.id == id && proxy_name == "work" && *to == ReplyTo::Respawned(id)
         )));
+    }
+
+    /// `--first-party` reaches a restart in its run, and the session keeps it
+    /// (so a later restart in a run without the flag keeps the env).
+    #[test]
+    fn first_party_flag_reaches_a_restart_and_is_kept() {
+        let mut app = app_with(&[info(Some(1), Some("c1"))]);
+        app.sessions[0].proxy = Some("work".into());
+        app.first_party = true;
+        let id = app.sessions[0].id;
+        app.reset_session(id, false);
+        let effects = app.take_effects();
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::SpawnWithProxy { proxy_name, first_party: true, .. } if proxy_name == "work"
+        )));
+        assert!(app.sessions[0].first_party);
+
+        app.first_party = false;
+        app.reset_session(id, false);
+        let effects = app.take_effects();
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::SpawnWithProxy {
+                first_party: true,
+                ..
+            }
+        )));
+    }
+
+    /// Only a proxied claude session keeps `--first-party`: a plain session
+    /// or a terminal has no proxy env for it to change.
+    #[test]
+    fn first_party_flag_is_not_kept_without_a_proxy() {
+        let mut app = app_with(&[info(Some(1), Some("c1"))]);
+        app.first_party = true;
+        let id = app.sessions[0].id;
+        app.reset_session(id, false);
+        assert!(!app.sessions[0].first_party);
+        let effects = app.take_effects();
+        assert!(!effects.iter().any(|e| matches!(e, Effect::SpawnWithProxy { .. })));
     }
 
     #[test]
