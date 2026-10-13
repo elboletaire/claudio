@@ -1,6 +1,6 @@
 [package]
 name = "claudio"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "Drop-in `claude` wrapper emulating `-p`, with an optional OpenAI-compatible API server (--api) routed through the same PTY-driven backend (responsible-disclosure research)"
 
