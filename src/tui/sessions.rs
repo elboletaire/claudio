@@ -578,13 +578,40 @@ impl App {
     }
 
     /// Full recovery: rebuild the entire session list from `saved` and the
-    /// daemon's `live` sessions (initial local startup).
+    /// local daemon's `live` sessions (initial startup).
+    ///
+    /// Tabs on remote hosts are kept as saved, detached, until their host
+    /// connects and [`recover_host`] reconciles them. Only state.json knows a
+    /// session's proxy profile: a tab dropped here would come back from its
+    /// daemon's list without one, and be respawned without the proxy.
     ///
     /// Only call once at startup. For reconnects, use [`recover_host`].
     pub fn recover(&mut self, saved: &ClientState, live: &[SessionInfo]) {
         // Merge in tombstones from saved state.
         self.killed = saved.killed.clone();
-        self.recover_host_inner("local", saved, live, true);
+        self.connected = true;
+        let size = self.pane_size();
+        self.sessions = saved
+            .sessions
+            .iter()
+            .filter(|s| !saved.is_killed(s.id))
+            .map(|s| SessionView {
+                state: SessionState::Unknown,
+                ..SessionView::from_saved(s.clone(), size)
+            })
+            .collect();
+        self.active = None;
+        self.recover_host_inner("local", saved, live);
+
+        let restore = saved.active.and_then(|id| self.index_of(id));
+        match restore.or((!self.sessions.is_empty()).then_some(0)) {
+            // Attached when its host connects.
+            Some(i) if self.sessions[i].host != "local" => self.active = Some(i),
+            Some(i) => self.activate(i),
+            None if self.modal.is_none() => self.open_wizard(),
+            None => {}
+        }
+        self.save();
     }
 
     /// Host-scoped recovery: reconcile only the given host's
@@ -592,8 +619,9 @@ impl App {
     ///
     /// - Does NOT touch sessions belonging to other hosts.
     /// - Assigns unknown live sessions the correct originating host (not "local").
-    /// - Preserves offline hosts' tabs, names and proxy associations.
+    /// - Preserves the host's tabs in place, with their names and proxy profiles.
     /// - Re-sends Kill for any tombstone that is still in the live list.
+    /// - Re-attaches the active tab when it is on this host.
     pub fn recover_host(&mut self, host: &str, live: &[SessionInfo]) {
         // Build a synthetic ClientState from current in-memory sessions for this host.
         let saved_for_host = ClientState {
@@ -608,32 +636,22 @@ impl App {
             killed: self.killed.clone(),
             ..Default::default()
         };
-        // Remove existing sessions for this host (they'll be re-added after merge).
-        let active_id = self.active_view().map(|v| v.id);
-        self.sessions.retain(|v| v.host != host);
-        // Adjust active index (may now point into a shrunk vec).
-        self.active = active_id.and_then(|id| self.sessions.iter().position(|v| v.id == id));
+        self.recover_host_inner(host, &saved_for_host, live);
 
-        self.recover_host_inner(host, &saved_for_host, live, false);
+        match self.active {
+            Some(i) if self.sessions[i].host == host => self.activate(i),
+            None if !self.sessions.is_empty() => self.activate(0),
+            _ => {}
+        }
+        self.save();
     }
 
-    /// Internal: merge `saved` + `live` for `host` and add the resulting
-    /// sessions to `self.sessions`. When `is_full` is true (initial startup),
-    /// sessions.clear() is called first and active/wizard logic runs.
-    fn recover_host_inner(
-        &mut self,
-        host: &str,
-        saved: &ClientState,
-        live: &[SessionInfo],
-        is_full: bool,
-    ) {
+    /// Merge `saved` + `live` for `host` and put the result in
+    /// `self.sessions`: a tab of `host` keeps its place (detached), one its
+    /// daemon no longer has is dropped, and a session we did not know is
+    /// appended. Dormant sessions are respawned.
+    fn recover_host_inner(&mut self, host: &str, saved: &ClientState, live: &[SessionInfo]) {
         let size = self.pane_size();
-        if is_full {
-            self.connected = true;
-            self.sessions.clear();
-            self.active = None;
-        }
-
         let merged = state::merge_for_host(host, saved, live);
 
         // Re-send Kill for tombstoned sessions that are still live.
@@ -643,6 +661,7 @@ impl App {
             }
         }
 
+        let mut recovered = Vec::new();
         for r in merged {
             if let Some(args) = r.respawn {
                 let req = SpawnRequest {
@@ -656,28 +675,25 @@ impl App {
                     self.notify(format!("cannot respawn '{}': {e}", r.saved.cwd));
                 }
             }
-            self.sessions.push(SessionView {
+            recovered.push(SessionView {
                 state: r.state,
                 title: r.title,
                 ..SessionView::from_saved(r.saved, size)
             });
         }
 
-        if is_full {
-            let restore = saved.active.and_then(|id| self.index_of(id));
-            match restore.or((!self.sessions.is_empty()).then_some(0)) {
-                Some(i) => self.activate(i),
-                None if self.modal.is_none() => self.open_wizard(),
-                None => {}
-            }
-        } else {
-            // After a per-host recovery, activate the first session for this
-            // host if nothing is currently active.
-            if self.active.is_none() && !self.sessions.is_empty() {
-                self.activate(0);
+        let active_id = self.active_view().map(|v| v.id);
+        let mut sessions = Vec::with_capacity(self.sessions.len() + recovered.len());
+        for v in std::mem::take(&mut self.sessions) {
+            if v.host != host {
+                sessions.push(v);
+            } else if let Some(j) = recovered.iter().position(|r| r.id == v.id) {
+                sessions.push(recovered.remove(j));
             }
         }
-        self.save();
+        sessions.extend(recovered);
+        self.sessions = sessions;
+        self.active = active_id.and_then(|id| self.index_of(id));
     }
 
     /// Re-run recovery after the local daemon reconnects.

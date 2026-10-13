@@ -1156,6 +1156,69 @@ mod tests {
         );
     }
 
+    /// A remote tab outlives the manager's restart: kept, detached, until its
+    /// host connects, then respawned (its daemon restarted meanwhile) with
+    /// its proxy profile, in its place, and re-attached as the active tab.
+    #[test]
+    fn remote_tabs_survive_a_restart_with_their_proxy() {
+        let local = info(Some(1), None);
+        let remote = SavedSession {
+            id: Uuid::new_v4(),
+            name: None,
+            cwd: "/srv/remote".into(),
+            host: "devbox".into(),
+            claude_session_id: Some("c9".into()),
+            created_at: 1,
+            proxy: Some("work".into()),
+            kind: SessionKind::Claude,
+        };
+        let saved = ClientState {
+            sessions: vec![
+                remote.clone(),
+                SessionView::from_info("local", &local, (1, 1)).saved(),
+            ],
+            active: Some(remote.id),
+            ..Default::default()
+        };
+        let mut app = test_support::app();
+        app.recover(&saved, std::slice::from_ref(&local));
+        let effects = app.take_effects();
+        assert!(
+            !requests(&effects)
+                .iter()
+                .any(|m| matches!(m, Msg::Attach { .. })),
+            "nothing attaches before devbox connects: {effects:?}"
+        );
+        let ids: Vec<_> = app.sessions.iter().map(|v| v.id).collect();
+        assert_eq!(ids, [remote.id, local.id]);
+        assert_eq!((app.active, app.sessions[0].attached), (Some(0), false));
+        assert_eq!(app.to_state().sessions[0], remote, "state.json keeps the tab");
+
+        // devbox's daemon restarted: the session is dormant.
+        let dormant = SessionInfo {
+            id: remote.id,
+            cwd: remote.cwd.clone(),
+            ..info(None, Some("c9"))
+        };
+        app.recover_host("devbox", &[dormant]);
+        let effects = app.take_effects();
+        assert!(
+            effects.iter().any(|e| matches!(e,
+                Effect::SpawnWithProxy { host, msg: Msg::Spawn(s), proxy_name, .. }
+                    if host == "devbox" && proxy_name == "work" && s.args == ["--resume", "c9"])),
+            "respawned with its proxy: {effects:?}"
+        );
+        let attach = Msg::Attach {
+            id: remote.id,
+            rows: 27,
+            cols: 100,
+        };
+        assert!(requests(&effects).contains(&&attach));
+        assert_eq!(app.sessions[0].id, remote.id, "in its place");
+        assert_eq!(app.sessions[0].proxy.as_deref(), Some("work"));
+        assert_eq!((app.active, app.sessions[0].attached), (Some(0), true));
+    }
+
     #[test]
     fn recover_host_does_not_wipe_other_hosts_sessions() {
         // Set up two sessions: one local, one remote.
